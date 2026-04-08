@@ -1,0 +1,203 @@
+%% Living Hinge Inerter – RMS-focused plotting (RAW UNNORMALISED PSD)
+% - Plots ONLY: Baseline RAW PSD (black) vs Experiment RAW PSD (red) in 0.5–3 Hz
+% - Computes band RMS from RAW PSD and prints RMS + % reduction vs baseline
+
+clear; clc; close all;
+
+% Parameters
+inertances = [0.0 0.1 0.2 0.3 0.4 0.5];
+masses_g   = [111 212 311 404 505];
+betas      = [0.05 0.10 0.15 0.20 0.25];
+FMIN = 0.5;
+FMAX = 3.0;
+
+% Data folder setup
+dataFolder   = 'C:\Users\Garym\OneDrive\Desktop\5E1\READDATA\';
+baselineFile = 'C:\Users\Garym\OneDrive\Desktop\5E1\BaseLineData\BASELINE.csv';
+allFiles = dir(fullfile(dataFolder, '*.csv'));
+fprintf('Found %d CSV files in data folder.\n', numel(allFiles));
+
+% Read baseline
+fprintf('Loading baseline...\n');
+Tbase = readExpCSV(baselineFile);
+[time_b, accel_b, Fs_b] = parseTimeAccel(Tbase);
+
+% Welch paramaters
+Nsig_b     = length(accel_b);
+nseg_b     = min(2048, floor(Nsig_b/4));
+noverlap_b = floor(nseg_b/2);
+nfft_b     = max(512, nseg_b);
+
+[Pxx_b, f_b] = pwelch(accel_b, hamming(nseg_b), noverlap_b, nfft_b, Fs_b);
+roi_b = (f_b >= FMIN & f_b <= FMAX);
+
+f_b_roi   = f_b(roi_b);
+Pxx_b_roi = Pxx_b(roi_b);
+
+% Baseline band RMS
+var_b = trapz(f_b_roi, Pxx_b_roi);
+rms_base = sqrt(var_b);
+
+fprintf('Baseline Fs = %.4f Hz | Baseline band RMS (%.1f–%.1f Hz) = %.6f\n\n', Fs_b, FMIN, FMAX, rms_base);
+
+% Loop through tests
+for bi = 1:length(inertances)
+    b = inertances(bi);
+
+    for mi = 1:length(masses_g)
+        targetMass = masses_g(mi);
+        targetBstr = sprintf('%.1fKgIn', b);
+
+        % Find matching experimental file
+        matchedFile = '';
+        for fi = 1:length(allFiles)
+            fname = allFiles(fi).name;
+            if contains(fname, targetBstr, 'IgnoreCase', true)
+                token = regexp(fname, '[Kk][Gg][Ii][Nn](\d+\.?\d*)', 'tokens', 'once');
+                if ~isempty(token)
+                    massInName = str2double(token{1});
+                    if abs(massInName - targetMass) <= 6
+                        matchedFile = fullfile(dataFolder, fname);
+                        break;
+                    end
+                end
+            end
+        end
+
+        if isempty(matchedFile)
+            fprintf('No match: b=%.2f | m2=%.0f g\n', b, targetMass);
+            continue;
+        end
+
+        [~, shortName] = fileparts(matchedFile);
+
+        % Read experiment
+        Texp = readExpCSV(matchedFile);
+        [time_e, accel_e, Fs_e] = parseTimeAccel(Texp);
+
+        if isempty(accel_e) || ~isfinite(Fs_e)
+            warning('Bad accel or Fs for %s', shortName);
+            continue;
+        end
+
+        % Welch parameters
+        Nsig     = length(accel_e);
+        nseg     = min(2048, floor(Nsig/4));
+        noverlap = floor(nseg/2);
+        nfft     = max(512, nseg);
+
+        [Pxx_e, f_e] = pwelch(accel_e, hamming(nseg), noverlap, nfft, Fs_e);
+        roi_e = (f_e >= FMIN & f_e <= FMAX);
+
+        if sum(roi_e) < 2
+            warning('Not enough PSD points in band for %s', shortName);
+            continue;
+        end
+
+        f_e_roi   = f_e(roi_e);
+        Pxx_e_roi = Pxx_e(roi_e);
+
+        % Experiment band RMS 
+        var_e = trapz(f_e_roi, Pxx_e_roi);
+        rms_exp = sqrt(var_e);
+
+        rms_red_pct = (1 - rms_exp/rms_base) * 100;
+
+        fprintf('b=%.2f | m2=%.0f g | Fs=%.3f | RMS=%.6f | RMS reduction=%.2f %% | %s\n', ...
+                b, targetMass, Fs_e, rms_exp, rms_red_pct, shortName);
+
+        % Plot ONLY: RAW, LINEAR, UNNORMALISED PSD overlay
+        figure('Name', sprintf('RAW PSD b=%.2f kg, m2=%dg', b, targetMass), 'Color', 'w');
+        hold on; grid on; box on;
+
+        plot(f_b_roi, Pxx_b_roi, 'k--', 'LineWidth', 1.5, 'DisplayName', 'Baseline RAW PSD');
+        plot(f_e_roi, Pxx_e_roi, 'r--', 'LineWidth', 1.8, 'DisplayName', 'Experiment RAW PSD');
+
+        set(gca, 'YScale', 'linear');
+        xlabel('Frequency (Hz)');
+        ylabel('PSD (raw units)');
+
+        % Plot
+        title(sprintf('RAW PSD (%.1f–%.1f Hz) | b = %.2f kg | m_2 = %d g | RMS reduction = %.2f%%', ...
+              FMIN, FMAX, b, targetMass, rms_red_pct));
+
+        xlim([FMIN FMAX]);
+        legend('show', 'Location', 'northeast');
+    end
+end
+
+disp('Done: RAW linear PSD plots + RMS reductions printed.');
+
+% Helper functions
+function T = readExpCSV(file)
+    fid = fopen(file,'r','n','UTF-8');
+    rawLines = textscan(fid,'%s','Delimiter','\n','Whitespace','');
+    fclose(fid);
+    lines = string(rawLines{1});
+    dataStartIdx = find(contains(lines,"DATA_START",'IgnoreCase',true),1);
+    if ~isempty(dataStartIdx)
+        lines = lines(dataStartIdx+1:end);
+    end
+    tmpFile = fullfile(tempdir,'temp_clean.csv');
+    fid = fopen(tmpFile,'w','n','UTF-8');
+    fprintf(fid,'%s\n',lines);
+    fclose(fid);
+    T = readtable(tmpFile,'VariableNamingRule','preserve');
+end
+
+function [time, accel_resp, Fs] = parseTimeAccel(T)
+    timeVar = '';
+    for n = {'Time','time','T','Seconds'}
+        if any(strcmpi(T.Properties.VariableNames,n{1})), timeVar = n{1}; break; end
+    end
+    if isempty(timeVar), timeVar = T.Properties.VariableNames{1}; end
+
+    accelVar = '';
+    for n = {'ch2','Ch2','Accel','accel','a','Acceleration'}
+        if any(strcmpi(T.Properties.VariableNames,n{1})), accelVar = n{1}; break; end
+    end
+    if isempty(accelVar)
+        accel_resp = []; time = []; Fs = NaN; return;
+    end
+
+    rawTime = string(T{:,timeVar});
+    try
+        if contains(rawTime(1),"/") && contains(rawTime(1),":")
+            dt = datetime(rawTime,'InputFormat','dd/MM/yyyy HH:mm:ss.SSS');
+            time = seconds(dt - dt(1));
+        elseif count(rawTime(1),":") == 2
+            td = duration(rawTime,'InputFormat','hh:mm:ss.SSS');
+            time = seconds(td - td(1));
+        elseif count(rawTime(1),":") == 1
+            time = zeros(size(rawTime));
+            for k = 1:length(rawTime)
+                token = regexp(strtrim(rawTime(k)),'^(\d+):(\d*\.?\d*)$','tokens','once');
+                if ~isempty(token)
+                    mm = str2double(token{1});
+                    ss = str2double(token{2});
+                    time(k) = mm*60 + ss;
+                end
+            end
+        else
+            tnum = T{:,timeVar};
+            if isnumeric(tnum) && all(isfinite(tnum))
+                time = tnum - tnum(1);
+            else
+                time = (0:length(rawTime)-1)'/10; 
+            end
+        end
+    catch
+        time = (0:length(rawTime)-1)'/10; 
+    end
+
+    time = time - time(1);
+
+    accel_resp = T{:,accelVar};
+    if ~isnumeric(accel_resp)
+        accel_resp = str2double(string(accel_resp));
+    end
+    accel_resp = accel_resp - mean(accel_resp,'omitnan');
+
+    dt = mean(diff(time));
+    Fs = 1 / dt;
+End
