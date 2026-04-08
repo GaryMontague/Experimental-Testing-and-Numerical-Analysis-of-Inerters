@@ -1,0 +1,129 @@
+%% Simple Inerter Plots + Effective Inertance
+clear; clc; close all;
+
+% USER SETTINGS
+dataFolder = 'C:\Users\Garym\OneDrive\Desktop\5E1\EXP DATA';
+savePlots = true;
+b_theory = 6.77;     % Leave blank for non-inerter experiments
+default_dt = 0.0156; % Used if DELTA_T not found
+
+
+files = dir(fullfile(dataFolder,'*.xlsx'));
+fprintf('Found %d files.\n', numel(files));
+
+for i = 1:numel(files)
+
+    filename = files(i).name;
+    filepath = fullfile(dataFolder, filename);
+    fprintf('\nProcessing: %s\n', filename);
+
+    % Read file
+    [~,~,raw] = xlsread(filepath);
+
+    firstNumericRow = find(cellfun(@(x) isnumeric(x) && ~isnan(x), raw(:,1)),1,'first');
+    data = cell2mat(raw(firstNumericRow:end,:));
+
+    xout = data(:,1);   % mm
+    Fout = data(:,2);   % kN (based on your header)
+    xin  = data(:,3);   % mm
+
+    % Units
+    xout = xout * 1e-3;   % m
+    xin  = xin  * 1e-3;   % m
+    Fout = Fout * 1e3;    % convert kN -> N
+
+    % Detect sampling time
+    dt = [];
+    for r = 1:size(raw,1)
+        if ischar(raw{r,1}) || isstring(raw{r,1})
+            txt = upper(string(raw{r,1}));
+            if contains(txt,'DELTA_T')
+                dt = raw{r,2};
+                break
+            end
+        end
+    end
+
+    if isempty(dt)
+        dt = default_dt;
+        fprintf('  DELTA_T not found. Using default dt = %.6f s\n', dt);
+    else
+        fprintf('  dt = %.6f s\n', dt);
+    end
+
+    % Relative displacement 
+    rel_disp = xout;
+
+    % Trim static regions
+    thresh = 0.05 * max(abs(rel_disp));
+    idx = find(abs(rel_disp) > thresh);
+    rel_disp = rel_disp(idx(1):idx(end));
+    Fout     = Fout(idx(1):idx(end));
+
+    % Acceleration calculation 
+    rel_disp_s = smoothdata(rel_disp,'movmean',5);
+
+    v_rel = gradient(rel_disp_s, dt);
+    a_rel = gradient(v_rel, dt);
+    a_rel = smoothdata(a_rel,'movmean',5);
+
+    fprintf('  Accel peak: %.4f m/s^2\n', max(abs(a_rel)));
+
+  
+    % Force–Displacement Plot
+    figure('Color','w');
+    plot(rel_disp, Fout,'k','LineWidth',1.4);
+    xlabel('Displacement (m)');
+    ylabel('Force (N)');
+    title(['Force–Displacement | ' strrep(filename,'_','\_')]);
+    grid on; box on;
+
+   
+    % Effective Inertance
+    F_zero = Fout - mean(Fout);
+    a_zero = a_rel - mean(a_rel);
+
+    p = polyfit(a_zero, F_zero, 1);
+    b_eff = p(1);
+
+    b_peak = max(abs(F_zero)) / max(abs(a_zero));
+
+    % Force–Acceleration Plot
+    figure('Color','w'); hold on;
+
+    plot(a_zero, F_zero,'b','LineWidth',2,'DisplayName','Experimental');
+
+    a_line = linspace(min(a_zero), max(a_zero), 200);
+    F_fit  = b_eff * a_line;
+
+    plot(a_line, F_fit,'r','LineWidth',2,...
+        'DisplayName',sprintf('Linear Fit (b = %.2f kg)', b_eff));
+
+    if ~isempty(b_theory)
+        F_ideal = b_theory * a_line;
+        plot(a_line, F_ideal,'k--','LineWidth',2,...
+            'DisplayName',sprintf('Ideal (%.2f kg)', b_theory));
+    end
+
+    xlabel('Acceleration (m/s^2)');
+    ylabel('Force (N)');
+    title(['Force–Acceleration | ' strrep(filename,'_','\_')]);
+    legend('Location','best');
+    grid on; box on;
+
+    
+    % Console Output
+    del_pp = (max(rel_disp) - min(rel_disp)) * 1000;
+
+    fprintf('  Disp p-p: %.2f mm\n', del_pp);
+    fprintf('  Force p-p: %.2f N\n', max(Fout)-min(Fout));
+    fprintf('  Effective inertance (fit):  %.3f kg\n', b_eff);
+    fprintf('  Effective inertance (peak): %.3f kg\n', b_peak);
+
+    if ~isempty(b_theory)
+        err = 100*(b_eff - b_theory)/b_theory;
+        fprintf('  %% Error vs theory: %.2f %%\n', err);
+    end
+end
+
+disp('Plots and effective inertance calculations complete.');
