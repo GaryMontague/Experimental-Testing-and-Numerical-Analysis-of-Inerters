@@ -1,0 +1,306 @@
+% CH7 Non-ideal Model — Structural SDOF with
+%   (i) baseline
+%   (ii) ideal grounded inerter
+%   (iii) grounded inerter + amplitude-dependent equivalent viscous damper
+%
+%   Extending the Chapter 7 ideal inerter study using an empirical
+%   amplitude-dependent equivalent damping coefficient ceq from Chapter 6.
+
+clear; clc; close all;
+
+% USER SETTINGS 
+bList = [6.77, 40.62];       % [kg]
+mList = [20, 200];           % [kg]
+
+fn   = 1.0;                  % [Hz]  <-- matched to Chapter 6 1 Hz data
+wn   = 2*pi*fn;              % [rad/s]
+zeta = 0.02;                 % [-]
+
+tEnd = 30;                   % [s]
+opts = odeset('RelTol',1e-7,'AbsTol',1e-9);
+
+% Ground acceleration input
+Ag      = 0.35*9.81;         % [m/s^2]
+fg      = fn;                % [Hz]
+t0      = 8.0;               % [s]
+nCycles = 8;                 % [-]
+Tb      = nCycles/fg;        % [s]
+ag = @(t) sineBurstAg(t, Ag, fg, t0, Tb);
+
+% Chapter 6 tie-in
+Fc_rep = 370;                % [N], representative bounded-force level
+
+% 1 Hz Chapter 6 data only:
+% A [mm]   = [25.066, 37.633, 50.146]
+% ceq [Ns/m] = [331.46, 151.86, 178.36]
+%
+% Quadratic fit to 1 Hz data:
+% ceq(A) = 0.654274*A^2 - 55.3137*A + 1306.87
+% with A in mm and ceq in N s/m
+ceq_poly = @(Amm) 0.654274*Amm.^2 - 55.3137*Amm + 1306.87;
+
+% Valid amplitude range from experimental data [mm]
+Amin_mm = 25.066;
+Amax_mm = 50.146;
+
+fprintf('Using matched 1 Hz amplitude-dependent equivalent damping fit:\n');
+fprintf('ceq(A) = 0.654274 A^2 - 55.3137 A + 1306.87  [A in mm]\n');
+fprintf('Amplitude clamped to %.3f to %.3f mm\n', Amin_mm, Amax_mm);
+fprintf('Structural frequency fn = %.2f Hz, forcing frequency fg = %.2f Hz\n', fn, fg);
+
+% FIGURE 1: Input 
+tPlot = linspace(0, tEnd, 5000)';
+agPlot = arrayfun(ag, tPlot);
+
+figure('Color','w');
+plot(tPlot, agPlot/9.81, 'LineWidth', 1.5);
+grid on; box on;
+xlabel('Time (s)');
+ylabel('Ground acceleration a_g (g)');
+title(sprintf('Input excitation: sine-burst at %.1f Hz with peak amplitude %.2f g', fg, Ag/9.81));
+
+% RUN CASES 
+Summary = table();
+basePeaks = struct();
+
+for im = 1:numel(mList)
+    m = mList(im);
+
+    k = m*wn^2;
+    c = 2*zeta*m*wn;
+
+    y0_base = [0;0];
+    y0_var  = [0;0;0];   % [z; zd; Ahat]
+
+    % Baseline 
+    rhsB = @(t,y) rhs_sdof_base(t,y,m,c,k,ag);
+    [tB,yB] = ode45(rhsB,[0 tEnd],y0_base,opts);
+
+    zB  = yB(:,1);
+    zdB = yB(:,2);
+    agB = arrayfun(ag,tB);
+
+    zddB  = (-c*zdB - k*zB - m*agB)./m;
+    aAbsB = zddB + agB;
+
+    basePeaks(im).m       = m;
+    basePeaks(im).peakZ   = max(abs(zB));
+    basePeaks(im).peakA   = max(abs(aAbsB));
+    basePeaks(im).peakZdd = max(abs(zddB));
+
+    for ib = 1:numel(bList)
+        b = bList(ib);
+
+        % Ideal inerter 
+        rhsI = @(t,y) rhs_sdof_inerter(t,y,m,c,k,b,ag);
+        [tI,yI] = ode45(rhsI,[0 tEnd],y0_base,opts);
+
+        zI  = yI(:,1);
+        zdI = yI(:,2);
+        agI = arrayfun(ag,tI);
+
+        zddI  = (-c*zdI - k*zI - m*agI)./(m+b);
+        aAbsI = zddI + agI;
+
+        peakZ_I   = max(abs(zI));
+        peakA_I   = max(abs(aAbsI));
+        peakZdd_I = max(abs(zddI));
+
+        redZ_I = 100*(basePeaks(im).peakZ - peakZ_I)/basePeaks(im).peakZ;
+        redA_I = 100*(basePeaks(im).peakA - peakA_I)/basePeaks(im).peakA;
+
+        a_th_I = Fc_rep / b;
+        ratio_I = peakZdd_I / a_th_I;
+
+        % Inerter + amplitude-dependent equivalent damper 
+        rhsID = @(t,y) rhs_sdof_inerter_damped_varceq(t,y,m,c,k,b,ag,ceq_poly,Amin_mm,Amax_mm);
+        [tD,yD] = ode45(rhsID,[0 tEnd],y0_var,opts);
+
+        zD    = yD(:,1);
+        zdD   = yD(:,2);
+        AhatD = yD(:,3);
+        agD   = arrayfun(ag,tD);
+
+        AmmD = 1e3*AhatD;
+        AmmD = max(min(AmmD, Amax_mm), Amin_mm);   % clamp to tested range
+        ceqD = ceq_poly(AmmD);
+
+        zddD  = (-(c+ceqD).*zdD - k*zD - m*agD)./(m+b);
+        aAbsD = zddD + agD;
+
+        peakZ_D   = max(abs(zD));
+        peakA_D   = max(abs(aAbsD));
+        peakZdd_D = max(abs(zddD));
+
+        redZ_D = 100*(basePeaks(im).peakZ - peakZ_D)/basePeaks(im).peakZ;
+        redA_D = 100*(basePeaks(im).peakA - peakA_D)/basePeaks(im).peakA;
+
+        a_th_D = Fc_rep / b;
+        ratio_D = peakZdd_D / a_th_D;
+
+        ceq_eff_mean = mean(ceqD);
+
+        % Store
+        Summary = [Summary; table( ...
+            m, b, ceq_eff_mean, fn, zeta, Ag/9.81, ...
+            peakZ_I, peakA_I, peakZdd_I, redZ_I, redA_I, ratio_I, ...
+            peakZ_D, peakA_D, peakZdd_D, redZ_D, redA_D, ratio_D, ...
+            'VariableNames', { ...
+            'm_kg','b_kg','ceq_Ns_m','fn_Hz','zeta','Ag_g', ...
+            'peakZ_ideal_m','peakA_ideal_ms2','zddpk_ideal_ms2','redZ_ideal_pct','redA_ideal_pct','ratio_ideal', ...
+            'peakZ_damped_m','peakA_damped_ms2','zddpk_damped_ms2','redZ_damped_pct','redA_damped_pct','ratio_damped'})];
+
+% FIGURES 2-5: Time histories 
+plotTimeHistoriesThreeCase(m,b,ceq_eff_mean,tB,zB,aAbsB,tI,zI,aAbsI,tD,zD,aAbsD);
+    end
+end
+
+disp('--- CH7 extension summary table ---');
+disp(Summary);
+
+% FIGURE 6: Peak displacement reduction vs inertance
+bPlot = bList(:);
+
+redZ_I_20 = zeros(size(bPlot)); redZ_D_20 = zeros(size(bPlot));
+redA_I_20 = zeros(size(bPlot)); redA_D_20 = zeros(size(bPlot));
+
+redZ_I_200 = zeros(size(bPlot)); redZ_D_200 = zeros(size(bPlot));
+redA_I_200 = zeros(size(bPlot)); redA_D_200 = zeros(size(bPlot));
+
+for ib = 1:numel(bList)
+    b = bList(ib);
+
+    r20  = Summary.m_kg==20  & Summary.b_kg==b;
+    r200 = Summary.m_kg==200 & Summary.b_kg==b;
+
+    redZ_I_20(ib)   = Summary.redZ_ideal_pct(r20);
+    redZ_D_20(ib)   = Summary.redZ_damped_pct(r20);
+    redA_I_20(ib)   = Summary.redA_ideal_pct(r20);
+    redA_D_20(ib)   = Summary.redA_damped_pct(r20);
+
+    redZ_I_200(ib)  = Summary.redZ_ideal_pct(r200);
+    redZ_D_200(ib)  = Summary.redZ_damped_pct(r200);
+    redA_I_200(ib)  = Summary.redA_ideal_pct(r200);
+    redA_D_200(ib)  = Summary.redA_damped_pct(r200);
+end
+
+figure('Color','w');
+plot(bPlot, redZ_I_20,  '-o', 'LineWidth', 1.6); hold on;
+plot(bPlot, redZ_D_20,  '--s', 'LineWidth', 1.6);
+plot(bPlot, redZ_I_200, '-o', 'LineWidth', 1.6);
+plot(bPlot, redZ_D_200, '--s', 'LineWidth', 1.6);
+grid on; box on;
+xlabel('Inertance b (kg)');
+ylabel('Peak relative displacement reduction (%)');
+title('Peak relative displacement reduction: ideal inerter vs inerter + equivalent damper');
+legend('m = 20 kg, ideal','m = 20 kg, damped','m = 200 kg, ideal','m = 200 kg, damped','Location','best');
+
+% FIGURE 7: Peak acceleration reduction vs inertance
+figure('Color','w');
+plot(bPlot, redA_I_20,  '-o', 'LineWidth', 1.6); hold on;
+plot(bPlot, redA_D_20,  '--s', 'LineWidth', 1.6);
+plot(bPlot, redA_I_200, '-o', 'LineWidth', 1.6);
+plot(bPlot, redA_D_200, '--s', 'LineWidth', 1.6);
+grid on; box on;
+xlabel('Inertance b (kg)');
+ylabel('Peak absolute acceleration reduction (%)');
+title('Peak absolute acceleration reduction: ideal inerter vs inerter + equivalent damper');
+legend('m = 20 kg, ideal','m = 20 kg, damped','m = 200 kg, ideal','m = 200 kg, damped','Location','best');
+
+% FIGURE 8: Ideal vs damped displacement change
+figure('Color','w');
+barDataZ = [redZ_I_20(:), redZ_D_20(:), redZ_I_200(:), redZ_D_200(:)];
+bar(categorical(string(bList)), barDataZ);
+grid on; box on;
+xlabel('Inertance b (kg)');
+ylabel('Peak relative displacement reduction (%)');
+title('Comparison of displacement reduction across modelling assumptions');
+legend('20 kg ideal','20 kg damped','200 kg ideal','200 kg damped','Location','best');
+
+% FIGURE 9: Ideal vs damped acceleration change
+figure('Color','w');
+barDataA = [redA_I_20(:), redA_D_20(:), redA_I_200(:), redA_D_200(:)];
+bar(categorical(string(bList)), barDataA);
+grid on; box on;
+xlabel('Inertance b (kg)');
+ylabel('Peak absolute acceleration reduction (%)');
+title('Comparison of acceleration reduction across modelling assumptions');
+legend('20 kg ideal','20 kg damped','200 kg ideal','200 kg damped','Location','best');
+
+disp(' CH7 non-ideal extension complete.');
+
+% Local functions
+
+function dydt = rhs_sdof_base(t, y, m, c, k, agFun)
+    z  = y(1);
+    zd = y(2);
+    ag = agFun(t);
+    zdd = (-c*zd - k*z - m*ag)/m;
+    dydt = [zd; zdd];
+end
+
+function dydt = rhs_sdof_inerter(t, y, m, c, k, b, agFun)
+    z  = y(1);
+    zd = y(2);
+    ag = agFun(t);
+    zdd = (-c*zd - k*z - m*ag)/(m+b);
+    dydt = [zd; zdd];
+end
+
+function dydt = rhs_sdof_inerter_damped_varceq(t, y, m, c, k, b, agFun, ceq_poly, Amin_mm, Amax_mm)
+    z    = y(1);
+    zd   = y(2);
+    Ahat = y(3);   % smooth running amplitude estimate [m]
+
+    ag = agFun(t);
+
+    % Smooth tracker of response amplitude
+    tauA = 0.20;   % [s]
+    dAhat = (abs(z) - Ahat)/tauA;
+
+    % Convert to mm and clamp to tested range
+    Amm = 1e3*Ahat;
+    Amm = max(min(Amm, Amax_mm), Amin_mm);
+
+    % Amplitude-dependent equivalent damping
+    ceq = ceq_poly(Amm);
+
+    % Equation of motion
+    zdd = (-(c+ceq)*zd - k*z - m*ag)/(m+b);
+
+    dydt = [zd; zdd; dAhat];
+end
+
+function a = sineBurstAg(t, Ag, fg, t0, Tb)
+    if t < t0 || t > (t0 + Tb)
+        a = 0;
+        return;
+    end
+    tau = t - t0;
+    env = 0.5*(1 - cos(2*pi*tau/Tb));
+    a = Ag * sin(2*pi*fg*tau) * env;
+end
+
+function plotTimeHistoriesThreeCase(m,b,ceq,tB,zB,aAbsB,tI,zI,aAbsI,tD,zD,aAbsD)
+    figure('Color','w','Name',sprintf('m=%g kg, b=%g kg',m,b));
+
+    subplot(2,1,1);
+    plot(tB,1e3*zB,'LineWidth',1.4); hold on;
+    plot(tI,1e3*zI,'LineWidth',1.4);
+    plot(tD,1e3*zD,'LineWidth',1.4);
+    grid on; box on;
+    xlabel('Time (s)');
+    ylabel('Relative displacement z (mm)');
+    title(sprintf('Relative displacement response (m = %g kg, b = %g kg, mean c_{eq} = %.1f Ns/m)',m,b,ceq));
+    legend('Baseline','Ideal inerter','Inerter + eq damper','Location','best');
+
+    subplot(2,1,2);
+    plot(tB,aAbsB/9.81,'LineWidth',1.4); hold on;
+    plot(tI,aAbsI/9.81,'LineWidth',1.4);
+    plot(tD,aAbsD/9.81,'LineWidth',1.4);
+    grid on; box on;
+    xlabel('Time (s)');
+    ylabel('Absolute acceleration a_{abs} (g)');
+    title('Absolute acceleration response');
+    legend('Baseline','Ideal inerter','Inerter + eq damper','Location','best');
+end
