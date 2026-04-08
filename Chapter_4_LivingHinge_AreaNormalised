@@ -1,0 +1,294 @@
+%% Living Hinge Inerter – Compare Baseline, Experiment & Grounded Inerter Model
+clear; clc; close all;
+
+% Base structure parameters
+g = 9.81;
+l = 0.20;
+m1 = 2.0;
+f1 = 1.2;
+zeta1 = 0.02;
+
+w1 = 2*pi*f1;
+k1 = m1*w1^2;
+c1 = 2*zeta1*sqrt(m1*k1);
+
+% Frequency range
+f = linspace(0.5,3,2000);
+w = 2*pi*f;
+
+% Parameter sets
+inertances = [0 0.1 0.2 0.3 0.4 0.5];
+masses_g   = [111 212 311 404 505];
+betas      = [0.05 0.10 0.15 0.20 0.25];
+
+% Data folder setup
+dataFolder = 'C:\Users\Garym\OneDrive\Desktop\5E1\READDATA\';
+baselineFile = 'C:\Users\Garym\OneDrive\Desktop\5E1\BaseLineData\BASELINE.csv';
+allFiles = dir(fullfile(dataFolder, '*.csv'));
+fprintf('Found %d CSV files in data folder.\n', numel(allFiles));
+
+% Read baseline
+fprintf('Loading experimental baseline...\n');
+Tbase = readExpCSV(baselineFile);
+[time_b, accel_b, Fs_b] = parseTimeAccel(Tbase);
+
+% Adaptive Welch parameters
+Nsig_b = length(accel_b);
+nseg_b = min(2048, floor(Nsig_b/4));
+noverlap_b = floor(nseg_b/2);
+nfft_b = max(512, nseg_b);
+
+[Pxx_b, f_b] = pwelch(accel_b, hamming(nseg_b), noverlap_b, nfft_b, Fs_b);
+roi_b = (f_b >= 0.5 & f_b <= 3);
+f_b = f_b(roi_b);
+Gaa_exp_base = movmean(Pxx_b(roi_b), 10);
+
+% Area Normalisation
+area_b = trapz(f_b, Gaa_exp_base);
+if area_b > 0 && isfinite(area_b)
+    Gaa_exp_base = Gaa_exp_base / area_b;
+end
+
+fprintf('Baseline loaded: Fs = %.2f Hz, samples = %d\n', Fs_b, length(accel_b));
+
+% loop through all tests
+for bi = 1:length(inertances)
+    b = inertances(bi);
+
+    for mi = 1:length(masses_g)
+        m2 = masses_g(mi)/1000;
+        beta = betas(mi);
+
+        % Secondary path properties
+        k2 = m2*g/l;
+        c2 = 2*beta*sqrt(k2*m2);
+
+        % Create figure
+        figure('Name', sprintf('b=%.2fkg, m2=%.0fg', b, masses_g(mi)), 'Color', 'w');
+        hold on; grid on; box on;
+
+        % Plot baseline
+        plot(f_b, Gaa_exp_base, 'k--', 'LineWidth', 1.2, ...
+            'DisplayName', 'Exp Baseline - No Inerter & No Mass');
+
+        % Find experiment file
+        targetMass = masses_g(mi);
+        targetBstr = sprintf('%.1fKgIn', b);
+        matchedFile = '';
+
+        for fi = 1:length(allFiles)
+            fname = allFiles(fi).name;
+            if contains(fname, targetBstr, 'IgnoreCase', true)
+                token = regexp(fname, '[Kk][Gg][Ii][Nn](\d+\.?\d*)', 'tokens', 'once');
+                if ~isempty(token)
+                    massInName = str2double(token{1});
+                    if abs(massInName - targetMass) <= 6
+                        matchedFile = fullfile(dataFolder, fname);
+                        break;
+                    end
+                end
+            end
+        end
+
+        if isempty(matchedFile)
+            warning('No matching file for b=%.2fkg, m2=%.0fg', b, targetMass);
+            continue;
+        end
+
+        [~, shortName] = fileparts(matchedFile);
+        fprintf('Loaded file: %s\n', shortName);
+
+        % Read and process experiment
+        Texp = readExpCSV(matchedFile);
+        [time_e, accel_e, Fs_e] = parseTimeAccel(Texp);
+
+        if isempty(accel_e)
+            warning('No acceleration data in %s', shortName);
+            continue;
+        end
+
+        % Adaptive Welch PSD
+        Nsig = length(accel_e);
+        nseg = min(2048, floor(Nsig/4));
+        noverlap = floor(nseg/2);
+        nfft = max(512, nseg);
+
+        [Pxx_e, f_e] = pwelch(accel_e, hamming(nseg), noverlap, nfft, Fs_e);
+        roi = (f_e >= 0.5 & f_e <= 3);
+        f_e = f_e(roi);
+        Gaa_exp = movmean(Pxx_e(roi), 10);
+
+        % Area Normalisation
+        area_e = trapz(f_e, Gaa_exp);
+        if area_e > 0 && isfinite(area_e)
+            Gaa_exp = Gaa_exp / area_e;
+        end
+
+        % Plot experimental PSD
+        plot(f_e, Gaa_exp, 'r--', 'LineWidth', 1.6, ...
+            'DisplayName', sprintf('Exp: b=%.2fkg, m2≈%.0fg', b, targetMass));
+
+        % Theoretical model
+        % DOF 1 = host structure
+        % DOF 2 = hanging secondary mass
+        % Inerter is GROUNDED and acts on DOF 
+
+        % Physical mass matrix
+        M0 = [m1   0;
+               0  m2];
+
+        % Grounded inerter contribution on DOF 2
+        Mb = [0  0;
+              0  b];
+
+        % Total inertia matrix
+        M = M0 + Mb;
+
+        % Stiffness and damping matrices
+        % Primary structure to base: k1, c1
+        % Secondary mass coupled to primary through hinge/string path: k2, c2
+        K = [k1+k2  -k2;
+             -k2     k2];
+
+        C = [c1+c2  -c2;
+             -c2     c2];
+
+        % Base excitation vector
+        % Same base motion imposed on both physical masses
+        r = [1; 1];
+
+        % Base acceleration forcing should act through PHYSICAL masses only
+        % not through grounded inerter inertance
+        Fbase_per_Ag = -M0 * r;
+
+        % Frequency response calculation
+        Haa = zeros(size(f));
+
+        for j = 1:length(f)
+            wj = w(j);
+            jw = 1i*wj;
+
+            % Dynamic stiffness
+            Z = K + jw*C - (wj^2)*M;
+
+            % Relative coordinates response per unit base accel
+            Q_over_Ag = Z \ Fbase_per_Ag;
+
+            % Absolute acceleration of primary mass / base acceleration
+            Haa(j) = -wj^2 * Q_over_Ag(1) + 1;
+        end
+
+        Gaa_model = abs(Haa).^2;
+        Gaa_model = movmean(Gaa_model, 10);
+
+        % Area Normalisation for model
+        area_m = trapz(f, Gaa_model);
+        if area_m > 0 && isfinite(area_m)
+            Gaa_model = Gaa_model / area_m;
+        end
+
+        % Plot model
+        plot(f, Gaa_model, 'b-', 'LineWidth', 2, ...
+            'DisplayName', sprintf('Model: b=%.2fkg, m2=%.0fg, \\beta=%.2f', b, masses_g(mi), beta));
+
+        % Formatting
+        set(gca, 'YScale', 'log');
+        xlabel('Frequency (Hz)');
+        ylabel('PSD [1/Hz]');
+        title(sprintf('Living Hinge Inerter – b=%.2fkg, m2=%.0fg', b, masses_g(mi)));
+        xlim([0.5 3]);
+        ylim([1e-4 10]);
+        legend('show', 'Location', 'northeast');
+    end
+end
+
+disp('All plots generated successfully with experimental + grounded-inerter model PSDs area-normalised and smoothed.');
+
+% Helper functions
+function T = readExpCSV(file)
+    fid = fopen(file,'r','n','UTF-8');
+    rawLines = textscan(fid,'%s','Delimiter','\n','Whitespace','');
+    fclose(fid);
+
+    lines = string(rawLines{1});
+    dataStartIdx = find(contains(lines,"DATA_START",'IgnoreCase',true),1);
+
+    if ~isempty(dataStartIdx)
+        lines = lines(dataStartIdx+1:end);
+    end
+
+    tmpFile = fullfile(tempdir,'temp_clean.csv');
+    fid = fopen(tmpFile,'w','n','UTF-8');
+    fprintf(fid,'%s\n',lines);
+    fclose(fid);
+
+    T = readtable(tmpFile,'VariableNamingRule','preserve');
+end
+
+function [time, accel_resp, Fs] = parseTimeAccel(T)
+    % Detect time column
+    timeVar = '';
+    for n = {'Time','time','T','Seconds'}
+        if any(strcmpi(T.Properties.VariableNames,n{1}))
+            timeVar = n{1};
+            break;
+        end
+    end
+    if isempty(timeVar)
+        timeVar = T.Properties.VariableNames{1};
+    end
+
+    % Detect acceleration column
+    accelVar = '';
+    for n = {'ch2','Ch2','Accel','accel','a','Acceleration'}
+        if any(strcmpi(T.Properties.VariableNames,n{1}))
+            accelVar = n{1};
+            break;
+        end
+    end
+    if isempty(accelVar)
+        accel_resp = [];
+        time = [];
+        Fs = NaN;
+        return;
+    end
+
+    rawTime = string(T{:,timeVar});
+
+    try
+        if contains(rawTime(1),"/") && contains(rawTime(1),":")
+            dt = datetime(rawTime,'InputFormat','dd/MM/yyyy HH:mm:ss.SSS');
+            time = seconds(dt - dt(1));
+
+        elseif count(rawTime(1),":") == 2
+            time = duration(rawTime,'InputFormat','hh:mm:ss.SSS');
+            time = seconds(time - time(1));
+
+        elseif count(rawTime(1),":") == 1
+            time = zeros(size(rawTime));
+            for k = 1:length(rawTime)
+                token = regexp(strtrim(rawTime(k)),'^(\d+):(\d*\.?\d*)$','tokens','once');
+                if ~isempty(token)
+                    mm = str2double(token{1});
+                    ss = str2double(token{2});
+                    time(k) = mm*60 + ss;
+                end
+            end
+
+        else
+            time = (0:length(rawTime)-1)'/10;
+        end
+    catch
+        time = (0:length(rawTime)-1)'/10;
+    end
+
+    time = time - time(1);
+
+    accel_resp = T{:,accelVar};
+    if ~isnumeric(accel_resp)
+        accel_resp = str2double(string(accel_resp));
+    end
+
+    accel_resp = accel_resp - mean(accel_resp,'omitnan');
+    Fs = 1 / mean(diff(time));
+end
