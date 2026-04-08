@@ -265,9 +265,9 @@ for k = 1:numel(u)
     m = (fgrp == u(k));
     scatter(results.A_mm(m), results.ratio(m), 90, 'filled', 'DisplayName', u(k));
 end
-yline(1, 'LineWidth', 1.6);
+yline(1, 'LineWidth', 1.6, 'DisplayName', 'a_{pk}/a^* = 1');
 xlabel('Measured amplitude A [mm]');
-ylabel('Ratio: a_{pk} / (F_c / b)');
+ylabel('Ratio: a_{pk} / a^*');
 title('Inertial dominance check (ratio > 1 means inertial term can exceed F_c at peaks)');
 legend('Location','best');
 
