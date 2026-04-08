@@ -1,0 +1,338 @@
+%% CH6 metrics from Appendix B reader (WITH inertial dominance check)
+%
+% Outputs:
+%   Fc      = estimated friction plateau force [N]
+%   E_cycle = energy dissipated per cycle [J]
+%   ceq     = equivalent viscous damping [N·s/m]
+%   a_pk    = peak |acceleration| over analysed steady window [m/s^2]
+%   a_star  = Fc / b_inerter  [m/s^2]
+%   ratio   = a_pk / a_star   (>1 => inertial term can exceed Fc at peaks)
+
+clear; clc; close all;
+
+dataFolder = 'C:\Users\Garym\OneDrive\Desktop\5E1\EXP DATA';
+
+SMOOTH_N = 11;            % same as Appendix B
+N_ANALYSE_CYC = 3;        % use last N cycles
+MID_FRAC = [0.45 0.85];   % centred mid-stroke band for Fc
+VEL_FRAC = 0.15;          % "moving" threshold for Fc
+
+b_inerter = 6.77;         % [kg] measured inertance
+
+files = dir(fullfile(dataFolder, '*.xlsx'));
+files = files(~startsWith({files.name}, '~$')); % skip Excel lock files
+
+fprintf('Found %d files:\n', numel(files));
+disp(string({files.name}'));
+
+results = table();
+
+for i = 1:numel(files)
+    filename = files(i).name;
+    filepath = fullfile(dataFolder, filename);
+    fprintf('\nProcessing: %s\n', filename);
+
+    % Read Excel and extract numeric data
+    [~, ~, raw] = xlsread(filepath);
+
+    firstNumericRow = findFirstNumericRow(raw, 1:3);
+    if isempty(firstNumericRow)
+        warning('No numeric block found in %s (skipping)', filename);
+        continue;
+    end
+
+    data = rawBlockToNumeric(raw(firstNumericRow:end, :));
+    if size(data,2) < 3
+        warning('Numeric block has <3 cols in %s (skipping)', filename);
+        continue;
+    end
+
+    % Column mapping
+    xout = data(:,1);   % feedback disp (mm)
+    Fout = data(:,2);   % force (kN)
+    xin  = data(:,3);   % command disp (mm)
+
+    % Units
+    xin  = xin  * 1e-3; % mm -> m
+    xout = xout * 1e-3; % mm -> m
+    Fout = Fout * 1e3;  % kN -> N
+
+    % Sampling time dt
+    dt = 0.0156; % default
+    for r = 1:min(50,size(raw,1))
+        try
+            val = raw{r,1};
+            if ischar(val) || isstring(val)
+                txt = upper(strtrim(string(val)));
+                if contains(txt,"DELTA_T") || contains(txt,"DELTA T")
+                    dtCandidate = raw{r,2};
+                    if isnumeric(dtCandidate) && isfinite(dtCandidate)
+                        dt = dtCandidate;
+                        break
+                    end
+                end
+            end
+        catch
+        end
+    end
+
+    % Relative displacement + smoothed kinematics
+    rel_disp = xout; % use feedback as relative displacement
+
+    rel_disp_s = smoothdata(rel_disp, 'movmean', SMOOTH_N);
+    v_rel = gradient(rel_disp_s, dt);
+    a_rel = gradient(v_rel, dt);
+    a_rel = smoothdata(a_rel, 'movmean', SMOOTH_N);
+
+    % Smoothed command for cycle detection
+    xin_s = smoothdata(xin, 'movmean', SMOOTH_N);
+
+% Cycle detection using measured displacement peaks
+f_name = parseHz(filename);
+
+if isnan(f_name)
+    minPeakDist = max(10, round(0.3/dt));
+else
+    minPeakDist = max(10, round(0.8*(1/f_name)/dt));
+end
+
+xcyc = smoothdata(xout,'movmean',SMOOTH_N);
+xcyc = xcyc - mean(xcyc,'omitnan');
+
+xrng = max(xcyc) - min(xcyc);
+prom = max(1e-6, 0.03*xrng);
+
+[~, locs] = findpeaks(xcyc, ...
+    'MinPeakDistance', minPeakDist, ...
+    'MinPeakProminence', prom);
+
+if numel(locs) < 2
+    [~, locs] = findpeaks(-xcyc, ...
+        'MinPeakDistance', minPeakDist, ...
+        'MinPeakProminence', prom);
+end
+
+if numel(locs) < 2
+    warning('Not enough peaks detected in %s (skipping metrics)', filename);
+    continue;
+end
+
+nFull = numel(locs) - 1;
+nUse  = min(N_ANALYSE_CYC, nFull);
+useIdx = (nFull - nUse + 1) : nFull;
+
+cycStarts = locs(useIdx);
+cycEnds   = locs(useIdx+1);
+
+Tcyc = mean((cycEnds - cycStarts) * dt);
+f_est = 1 / Tcyc;
+
+    % Compute metrics per cycle then average
+    Ecyc = zeros(nUse,1);
+    Acyc = zeros(nUse,1);
+    Fcc  = zeros(nUse,1);
+
+    for j = 1:nUse
+        i1 = cycStarts(j);
+        i2 = cycEnds(j);
+
+        xw = rel_disp(i1:i2);   % raw displacement in this cycle [m]
+        Fw = Fout(i1:i2);       % force [N]
+        vw = v_rel(i1:i2);      % velocity [m/s]
+
+        % Centre displacement within this cycle
+        xmid = 0.5 * (max(xw) + min(xw));
+        xwc  = xw - xmid;
+
+        % Amplitude from centred displacement
+        A = 0.5 * (max(xwc) - min(xwc));   % [m]
+        Acyc(j) = A;
+
+        % Energy per cycle: integral F dx
+        dX = diff(xw);
+        Fav = 0.5 * (Fw(2:end) + Fw(1:end-1));
+        Ecyc(j) = abs(sum(Fav .* dX));
+
+        % Plateau force estimate from centred mid-stroke moving points
+        vabs = abs(vw);
+        vth = VEL_FRAC * max(vabs);
+
+        mid = (abs(xwc) >= MID_FRAC(1)*A) & ...
+              (abs(xwc) <= MID_FRAC(2)*A) & ...
+              (vabs >= vth);
+
+        if nnz(mid) < 5
+            % fallback mask if too few points
+            mid = (abs(xwc) >= 0.20*A) & ...
+                  (abs(xwc) <= 0.80*A) & ...
+                  (vabs >= 0.10*max(vabs));
+        end
+
+        if nnz(mid) < 3
+            Fcc(j) = NaN;
+        else
+            % median is more robust than mean for messy loops
+            Fcc(j) = median(abs(Fw(mid)), 'omitnan');
+        end
+    end
+
+    Amean = mean(Acyc, 'omitnan');
+    Emean = mean(Ecyc, 'omitnan');
+    Fc    = mean(Fcc,  'omitnan');
+
+    % Equivalent viscous damping:
+    % E_cycle = 2*pi^2*c*f*A^2
+    ceq = Emean / (2*pi^2 * f_est * Amean^2);
+
+    % Inertial dominance / masking check
+    idx1 = cycStarts(1);
+    idx2 = cycEnds(end);
+
+    a_pk = max(abs(a_rel(idx1:idx2)));
+
+    a_star = Fc / b_inerter;
+
+    ratio = a_pk / a_star;
+
+    
+    % Print + store result
+    cmd_pp = (max(xin)  - min(xin))  * 1e3;
+    fbk_pp = (max(xout) - min(xout)) * 1e3;
+    del_pp = (max(rel_disp) - min(rel_disp)) * 1e3;
+
+    fprintf('  dt = %.6g s | f_name = %s | f_est = %.3f Hz\n', dt, num2str(f_name), f_est);
+    fprintf('  Command p-p: %.2f mm | Feedback p-p: %.2f mm | Used delta p-p: %.2f mm\n', cmd_pp, fbk_pp, del_pp);
+    fprintf('  Fc ≈ %.2f N | E_cycle ≈ %.5f J | ceq ≈ %.2f N·s/m\n', Fc, Emean, ceq);
+    fprintf('  a_pk ≈ %.4g m/s^2 | a* = Fc/b ≈ %.4g m/s^2 | ratio a_pk/a* = %.3f\n', a_pk, a_star, ratio);
+
+    results = [results; table(string(filename), dt, f_est, Amean*1e3, Fc, Emean, ceq, ...
+        a_pk, a_star, ratio, ...
+        'VariableNames', {'File','dt_s','f_Hz','A_mm','Fc_N','E_J_per_cycle','ceq_Ns_m', ...
+                          'a_pk_ms2','a_star_ms2','ratio'})];
+end
+
+disp('--- Summary table (not saved) ---');
+disp(results);
+
+% Group labels for plotting
+fgrp = strings(height(results),1);
+for i = 1:height(results)
+    if results.f_Hz(i) < 0.75
+        fgrp(i) = "0.5 Hz tests";
+    else
+        fgrp(i) = "1.0 Hz tests";
+    end
+end
+
+u = unique(fgrp);
+
+% Figure 6.2: Energy per cycle vs amplitude
+figure('Color','w'); hold on; grid on; box on;
+for k = 1:numel(u)
+    m = (fgrp == u(k));
+    scatter(results.A_mm(m), results.E_J_per_cycle(m), 90, 'filled', 'DisplayName', u(k));
+end
+xlabel('Measured amplitude A [mm]');
+ylabel('Energy dissipated per cycle E [J]');
+title('Energy dissipation per cycle vs amplitude');
+legend('Location','best');
+
+% Figure 6.3: Equivalent damping vs amplitude
+figure('Color','w'); hold on; grid on; box on;
+for k = 1:numel(u)
+    m = (fgrp == u(k));
+    scatter(results.A_mm(m), results.ceq_Ns_m(m), 90, 'filled', 'DisplayName', u(k));
+end
+xlabel('Measured amplitude A [mm]');
+ylabel('Equivalent viscous damping c_{eq} [N·s/m]');
+title('Equivalent damping vs amplitude');
+legend('Location','best');
+
+% Figure 6.4: Plateau force vs amplitude
+figure('Color','w'); hold on; grid on; box on;
+for k = 1:numel(u)
+    m = (fgrp == u(k));
+    scatter(results.A_mm(m), results.Fc_N(m), 90, 'filled', 'DisplayName', u(k));
+end
+xlabel('Measured amplitude A [mm]');
+ylabel('Estimated plateau force F_c [N]');
+title('Friction plateau estimate vs amplitude');
+legend('Location','best');
+
+% Figure 6.5: Inertial dominance ratio vs amplitude
+figure('Color','w'); hold on; grid on; box on;
+for k = 1:numel(u)
+    m = (fgrp == u(k));
+    scatter(results.A_mm(m), results.ratio(m), 90, 'filled', 'DisplayName', u(k));
+end
+yline(1, 'LineWidth', 1.6);
+xlabel('Measured amplitude A [mm]');
+ylabel('Ratio: a_{pk} / (F_c / b)');
+title('Inertial dominance check (ratio > 1 means inertial term can exceed F_c at peaks)');
+legend('Location','best');
+
+% helper functions 
+function r0 = findFirstNumericRow(raw, colIdx)
+    r0 = [];
+    nR = size(raw,1);
+    for r = 1:nR
+        hit = false;
+        for c = colIdx
+            if c <= size(raw,2)
+                v = raw{r,c};
+                if isnumeric(v) && isfinite(v) && ~isnan(v)
+                    hit = true;
+                    break;
+                end
+                if ischar(v) || isstring(v)
+                    vv = str2double(v);
+                    if isfinite(vv)
+                        hit = true;
+                        break;
+                    end
+                end
+            end
+        end
+        if hit
+            r0 = r;
+            return;
+        end
+    end
+end
+
+function X = rawBlockToNumeric(rawBlock)
+    nR = size(rawBlock,1);
+    nC = size(rawBlock,2);
+    X = NaN(nR,nC);
+
+    for r = 1:nR
+        for c = 1:nC
+            v = rawBlock{r,c};
+            if isnumeric(v) && isfinite(v)
+                X(r,c) = v;
+            elseif ischar(v) || isstring(v)
+                vv = str2double(v);
+                if isfinite(vv)
+                    X(r,c) = vv;
+                end
+            end
+        end
+    end
+
+    keepCols = any(isfinite(X),1);
+    X = X(:, keepCols);
+end
+
+function f = parseHz(name)
+    nm = lower(name);
+    if contains(nm,'0-5hz') || contains(nm,'0.5hz') || contains(nm,'0_5hz')
+        f = 0.5;
+        return;
+    end
+    tok = regexp(nm,'(\d+(\.\d+)?)hz','tokens','once');
+    if isempty(tok)
+        f = NaN;
+    else
+        f = str2double(tok{1});
+    end
+end
