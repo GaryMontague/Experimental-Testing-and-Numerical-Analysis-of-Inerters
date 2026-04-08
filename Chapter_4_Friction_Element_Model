@@ -1,0 +1,109 @@
+%  HYSTERETIC INERTER MODEL
+%  Stick–slip friction + pure inerter
+%  Prescribed displacement input
+
+clear; clc; close all;
+
+% Prescribed displacement input (matching the experiment)
+A_mm    = 25;        % displacement amplitude [mm]  (using 25 / 45 / 60)
+f       = 0.5;         % frequency [Hz]
+nCycles = 6;         % number of cycles
+dt      = 1e-3;      % time step [s]
+
+A = A_mm * 1e-3;     % [m]
+w = 2*pi*f;          % [rad/s]
+T = nCycles / f;     % total time
+t = (0:dt:T).';
+
+delta    = A * sin(w*t);
+delta_d  = A * w * cos(w*t);
+delta_dd = -A * w^2 * sin(w*t);
+
+delta_mm = delta * 1e3;
+
+% Model parameters
+b = 6.77;            % inertance [kg]  
+
+Fy_pos = 50;         % positive friction plateau [N]
+Fy_neg = 50;         % negative plateau magnitude [N]
+
+delta_y_mm = 0.5;    % pre-sliding displacement [mm]
+k_nl = Fy_pos / (delta_y_mm * 1e-3);  % stick stiffness [N/m]
+
+F_bias = 0;          % optional bias force
+
+% Stick–slip friction (stop operator)
+F_ss = zeros(size(t));
+dp   = 0;  % internal state
+
+for i = 1:length(t)
+    [F_ss(i), dp] = stopOperatorAsym(delta(i), dp, k_nl, Fy_pos, Fy_neg);
+end
+F_ss = F_ss + F_bias;
+
+% Inerter force and total force
+F_b   = b * delta_dd;
+F_tot = F_ss + F_b;
+
+% ENERGY DISSIPATION (area of F–δ loop)
+E_cycle = trapz(delta, F_ss);
+fprintf('Approx. energy dissipated per cycle: %.2f J\n', abs(E_cycle));
+
+% 1) Friction-only: Force–Displacement
+figure('Color','w','Name','Friction only: F-δ');
+plot(delta_mm, F_ss, 'k', 'LineWidth', 1.6);
+grid on; box on;
+xlabel('\delta (mm)');
+ylabel('Force (N)');
+title(sprintf('F-\\delta (A = %.0f mm, f = %.1f Hz, F_z = %.0f N)', A_mm, f, Fy_pos));
+
+% 2) Pure inerter: Force–Acceleration
+figure('Color','w','Name','Pure inerter: F-a');
+plot(delta_dd, F_b, '.', 'MarkerSize', 6); hold on;
+aLine = linspace(min(delta_dd), max(delta_dd), 400);
+plot(aLine, b*aLine, 'r', 'LineWidth', 2);
+grid on; box on;
+xlabel('Acceleration (m/s^2)');
+ylabel('Force (N)');
+title(sprintf('Pure inerter: Force–Acceleration (A = %.0f mm, f = %.1f Hz, b = %.2f kg)', A_mm, f, b));
+legend('Samples','b-line','Location','best');
+
+% 3) Combined hysteretic inerter: Force–Displacement
+figure('Color','w','Name','Combined hysteretic inerter: Force–Displacement');
+plot(delta_mm, F_tot, 'b', 'LineWidth', 1.8);
+grid on; box on;
+xlabel('\delta (mm)');
+ylabel('Force (N)');
+title(sprintf('Combined hysteretic inerter: Force–Displacement (A = %.0f mm, f = %.1f Hz, F_z = %.0f N)', A_mm, f, Fy_pos));
+
+% 4) Combined hysteretic inerter: Force–Acceleration
+figure('Color','w','Name','Combined hysteretic inerter: F-a');
+plot(delta_dd, F_tot, '.', 'MarkerSize', 6); hold on;
+plot(aLine, b*aLine, 'r', 'LineWidth', 2);
+grid on; box on;
+xlabel('Acceleration (m/s^2)');
+ylabel('Force (N)');
+title(sprintf('Combined hysteretic inerter: Force–Acceleration (A = %.0f mm, f = %.1f Hz, F_z = %.0f N)', A_mm, f, Fy_pos));
+legend('Combined response','Pure b-line','Location','best');
+
+disp('Simulation complete.');
+
+%  Asymmetric stop-operator (stick–slip friction)
+function [F, dp_new] = stopOperatorAsym(delta, dp, k, Fy_pos, Fy_neg)
+
+    F_trial = k * (delta - dp);
+
+    if F_trial <= Fy_pos && F_trial >= -Fy_neg
+        % STICK
+        F = F_trial;
+        dp_new = dp;
+    else
+        % SLIP
+        if F_trial > Fy_pos
+            F = Fy_pos;
+        else
+            F = -Fy_neg;
+        end
+        dp_new = delta - F/k;
+    end
+end
