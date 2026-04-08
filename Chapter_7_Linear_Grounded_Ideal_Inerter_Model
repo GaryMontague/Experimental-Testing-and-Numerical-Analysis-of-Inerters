@@ -1,0 +1,248 @@
+% CH7 — Structural SDOF + grounded ideal inerter (using ODE45)
+% 2×2 study for thesis:
+%   b = 6.77 kg  (prototype)  and  b = 40.62 kg (new device)
+%   m = 20 kg and m = 200 kg
+%
+% Structural settings:
+%   fn = 1 Hz (fixed), zeta = 2% (fixed)
+%   For each m: k = m*wn^2, c = 2*zeta*m*wn
+%
+%
+% Chapter 6 tie-in:
+%   a_th = Fc_rep / b   (crossover acceleration scale)
+%   ratio = zdd_pk / a_th   where zdd is relative acceleration across inerter
+%
+% Outputs:
+%   Fig A: input ag(t)
+%   Fig B: 4 time-history figures (z and a_abs) for each (m,b) case
+%   Fig C: Peak reduction vs inertance (for m=20 and m=200)
+%   Fig D: zdd_pk / a_th vs inertance (for m=20 and m=200)
+%   Command window: summary table
+
+clear; clc; close all;
+
+% USER SETTINGS
+% Inertance values to compare
+bList = [6.77, 40.62];        % [kg]
+
+% Two modal masses for the headline comparison
+mList = [20, 200];            % [kg]
+
+% Structural properties (fixed mode)
+fn   = 1;                   % [Hz]
+wn   = 2*pi*fn;               % [rad/s]
+zeta = 0.02;                  % [-]
+
+% Time settings
+tEnd = 30;                    % [s]
+opts = odeset('RelTol',1e-7,'AbsTol',1e-9);
+
+% Ground accel sine-burst
+Ag      = 0.35*9.81;          % [m/s^2] peak ground accel (0.35g)
+fg      = fn;                 % [Hz] burst freq (near resonance)
+t0      = 8.0;                % [s] burst start
+nCycles = 8;                  % [-] burst cycles
+Tb      = nCycles/fg;         % [s] burst duration
+
+ag = @(t) sineBurstAg(t, Ag, fg, t0, Tb);
+
+% Chapter 6 tie-in: representative bounded-force level
+Fc_rep = 370;                 % [N] representative from Table 6.1
+
+% Plot input (ag)
+tPlot = linspace(0, tEnd, 5000)';
+agPlot = arrayfun(ag, tPlot);
+
+figure('Color','w'); grid on; box on;
+plot(tPlot, agPlot/9.81, 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('Ground acceleration a_g (g)');
+title(sprintf('Input excitation (sine-burst): f = %.1f Hz, A_g = %.2f g', fg, Ag/9.81));
+
+%% Run 2×2 cases
+Summary = table();
+
+% For the "reduction vs inertance" plots we need baseline peaks for each m
+basePeaks = struct();
+
+for im = 1:numel(mList)
+    m = mList(im);
+
+    % keep fn and zeta fixed
+    k = m*wn^2;
+    c = 2*zeta*m*wn;
+
+    % baseline run once per m
+    rhsB = @(t,y) rhs_sdof_base(t,y,m,c,k,ag);
+    y0 = [0;0];
+
+    [tB,yB] = ode45(rhsB, [0 tEnd], y0, opts);
+    zB  = yB(:,1);  zdB = yB(:,2);
+    agB = arrayfun(ag, tB);
+    zddB = (-c*zdB - k*zB - m*agB) ./ m;
+    aAbsB = zddB + agB;
+
+    basePeaks(im).m = m;
+    basePeaks(im).peakZ = max(abs(zB));
+    basePeaks(im).peakA = max(abs(aAbsB));
+    basePeaks(im).peakZdd = max(abs(zddB));
+
+    % inerter cases for each b
+    for ib = 1:numel(bList)
+        b = bList(ib);
+
+        rhsI = @(t,y) rhs_sdof_inerter(t,y,m,c,k,b,ag);
+        [tI,yI] = ode45(rhsI, [0 tEnd], y0, opts);
+
+        zI  = yI(:,1);  zdI = yI(:,2);
+        agI = arrayfun(ag, tI);
+
+        % EOM-based relative acceleration
+        zddI = (-c*zdI - k*zI - m*agI) ./ (m + b);
+
+        % Absolute acceleration
+        aAbsI = zddI + agI;
+
+        % Peaks
+        peakZ_I   = max(abs(zI));
+        peakA_I   = max(abs(aAbsI));
+        peakZdd_I = max(abs(zddI));
+
+        % Reductions (%)
+        redZ = 100*(basePeaks(im).peakZ - peakZ_I)/basePeaks(im).peakZ;
+        redA = 100*(basePeaks(im).peakA - peakA_I)/basePeaks(im).peakA;
+
+        % Chapter 6 tie-in
+        a_th = Fc_rep / b;
+        ratio = peakZdd_I / a_th;
+
+        % Store summary row
+        Summary = [Summary; table(m,b,fn,zeta,Ag/9.81, ...
+            peakZ_I, peakA_I, peakZdd_I, ...
+            basePeaks(im).peakZ, basePeaks(im).peakA, ...
+            redZ, redA, Fc_rep, a_th, ratio, ...
+            'VariableNames', {'m_kg','b_kg','fn_Hz','zeta','Ag_g', ...
+                              'peakZ_in_m','peakA_in_ms2','zddpk_in_ms2', ...
+                              'peakZ_bas_m','peakA_bas_ms2', ...
+                              'redZ_pct','redA_pct','Fc_rep_N','a_th_ms2','zddpk_over_ath'})];
+
+        % Plot time histories for this (m,b) case (one figure each)
+        plotTimeHistoriesCase(m, b, tB, zB, aAbsB, tI, zI, aAbsI);
+    end
+end
+
+disp('--- CH7 Summary table (copy/paste) ---');
+disp(Summary);
+
+% Comparison plots vs inertance 
+% Build arrays for plotting
+bPlot = bList(:);
+
+% Extract reductions and ratios for each mass
+redZ_m20 = zeros(size(bPlot));
+redA_m20 = zeros(size(bPlot));
+rat_m20  = zeros(size(bPlot));
+
+redZ_m200 = zeros(size(bPlot));
+redA_m200 = zeros(size(bPlot));
+rat_m200  = zeros(size(bPlot));
+
+for ib = 1:numel(bList)
+    b = bList(ib);
+
+    % rows for m=20 and m=200 at this b
+    r20  = Summary.m_kg==20  & Summary.b_kg==b;
+    r200 = Summary.m_kg==200 & Summary.b_kg==b;
+
+    redZ_m20(ib) = Summary.redZ_pct(r20);
+    redA_m20(ib) = Summary.redA_pct(r20);
+    rat_m20(ib)  = Summary.zddpk_over_ath(r20);
+
+    redZ_m200(ib) = Summary.redZ_pct(r200);
+    redA_m200(ib) = Summary.redA_pct(r200);
+    rat_m200(ib)  = Summary.zddpk_over_ath(r200);
+end
+
+% Peak displacement reduction vs b
+figure('Color','w'); grid on; box on;
+plot(bPlot, redZ_m20,  '-o', 'LineWidth', 1.6); hold on;
+plot(bPlot, redZ_m200, '-o', 'LineWidth', 1.6);
+xlabel('Inertance b (kg)');
+ylabel('Peak relative displacement reduction (%)');
+title(sprintf('Effect of inertance on peak relative displacement (f_n = %.1f Hz)', fn));
+legend('m = 20 kg','m = 200 kg','Location','best');
+
+% Peak acceleration reduction vs b
+figure('Color','w'); grid on; box on;
+plot(bPlot, redA_m20,  '-o', 'LineWidth', 1.6); hold on;
+plot(bPlot, redA_m200, '-o', 'LineWidth', 1.6);
+xlabel('Inertance b (kg)');
+ylabel('Peak absolute acceleration reduction (%)');
+title(sprintf('Effect of inertance on peak absolute acceleration (f_n = %.1f Hz)', fn));
+legend('m = 20 kg','m = 200 kg','Location','best');
+
+% Chapter 6 tie-in ratio vs b (note: a_th depends on b)
+figure('Color','w'); grid on; box on;
+plot(bPlot, rat_m20,  '-o', 'LineWidth', 1.6); hold on;
+plot(bPlot, rat_m200, '-o', 'LineWidth', 1.6);
+yline(1, 'LineWidth', 1.6);
+xlabel('Inertance b (kg)');
+ylabel('z̈_{pk} / a_{th}   (a_{th}=F_c/b)');
+title(sprintf('Chapter 6 tie-in: inertial dominance ratio vs inertance (F_c=%.0f N)', Fc_rep));
+legend('m = 20 kg','m = 200 kg','Location','best');
+
+disp(' CH7 2×2 study complete.');
+
+% Local functions
+
+function dydt = rhs_sdof_base(t, y, m, c, k, agFun)
+    % Baseline EOM: m zdd + c zd + k z = - m ag(t)
+    z  = y(1);
+    zd = y(2);
+    ag = agFun(t);
+
+    zdd = (-c*zd - k*z - m*ag) / m;
+    dydt = [zd; zdd];
+end
+
+function dydt = rhs_sdof_inerter(t, y, m, c, k, b, agFun)
+    % Grounded inerter EOM: (m+b) zdd + c zd + k z = - m ag(t)
+    z  = y(1);
+    zd = y(2);
+    ag = agFun(t);
+
+    zdd = (-c*zd - k*z - m*ag) / (m + b);
+    dydt = [zd; zdd];
+end
+
+function a = sineBurstAg(t, Ag, fg, t0, Tb)
+    % Raised-cosine enveloped sine burst
+    if t < t0 || t > (t0 + Tb)
+        a = 0; return;
+    end
+    tau = t - t0;
+    env = 0.5*(1 - cos(2*pi*tau/Tb));
+    a = Ag * sin(2*pi*fg*tau) * env;
+end
+
+function plotTimeHistoriesCase(m, b, tB, zB, aAbsB, tI, zI, aAbsI)
+    figure('Color','w','Name',sprintf('Time histories (m=%g kg, b=%g kg)',m,b));
+
+    subplot(2,1,1);
+    plot(tB, 1e3*zB, 'LineWidth', 1.4); hold on;
+    plot(tI, 1e3*zI, 'LineWidth', 1.4);
+    grid on; box on;
+    xlabel('Time (s)');
+    ylabel('Relative displacement z (mm)');
+    title(sprintf('Relative displacement (m = %g kg, b = %g kg)', m, b));
+    legend('Baseline','With ideal inerter','Location','best');
+
+    subplot(2,1,2);
+    plot(tB, aAbsB/9.81, 'LineWidth', 1.4); hold on;
+    plot(tI, aAbsI/9.81, 'LineWidth', 1.4);
+    grid on; box on;
+    xlabel('Time (s)');
+    ylabel('Absolute acceleration a_{abs} (g)');
+    title('Absolute acceleration');
+    legend('Baseline','With ideal inerter','Location','best');
+end
