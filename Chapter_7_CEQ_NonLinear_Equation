@@ -1,0 +1,61 @@
+%% 1 Hz c_eq(A) fit plot for Chapter 7
+clear; clc; close all;
+
+% 1 Hz experimental data
+A_mm = [25.066 37.633 50.146];          % amplitude [mm]
+ceq  = [331.46 151.86 178.36];          % c_eq [N s/m]
+
+
+% Quadratic fit
+p = polyfit(A_mm, ceq, 2);              % p(1)A^2 + p(2)A + p(3)
+
+A_fit = linspace(min(A_mm), max(A_mm), 400);
+ceq_fit = polyval(p, A_fit);
+
+% R^2
+ceq_pred = polyval(p, A_mm);
+SS_res = sum((ceq - ceq_pred).^2);
+SS_tot = sum((ceq - mean(ceq)).^2);
+R2 = 1 - SS_res/SS_tot;
+
+% Equation string
+if p(2) >= 0
+    term2 = sprintf('+ %.4fA', abs(p(2)));
+else
+    term2 = sprintf('- %.4fA', abs(p(2)));
+end
+
+if p(3) >= 0
+    term3 = sprintf('+ %.2f', abs(p(3)));
+else
+    term3 = sprintf('- %.2f', abs(p(3)));
+end
+
+eqnStr = sprintf('c_{eq}(A) = %.6fA^{2} %s %s', p(1), term2, term3);
+
+% Plot
+figure('Color','w');
+plot(A_mm, ceq, 'o', 'MarkerSize', 8, 'LineWidth', 1.5); hold on;
+plot(A_fit, ceq_fit, 'LineWidth', 1.8);
+
+grid on; box on;
+xlabel('Amplitude, A (mm)');
+ylabel('Equivalent viscous damping, c_{eq} (N s/m)');
+title('Amplitude-dependent equivalent viscous damping at 1 Hz');
+legend('1 Hz data','Second-order fit','Location','best');
+
+% Put equation on plot
+xText = min(A_mm) + 0.10*(max(A_mm)-min(A_mm));
+yText = max(ceq) - 0.05*(max(ceq)-min(ceq));
+
+text(xText, yText, eqnStr, ...
+    'FontSize', 12, ...
+    'BackgroundColor', 'w', ...
+    'EdgeColor', 'k', ...
+    'Margin', 6, ...
+    'Interpreter', 'tex');
+
+% Print to command window
+fprintf('Quadratic fit:\n');
+fprintf('c_eq(A) = %.6f*A^2 %+.6f*A %+.6f\n', p(1), p(2), p(3));
+fprintf('R^2 = %.6f\n', R2);
